@@ -1,6 +1,6 @@
 # SQL Business Reports
 
-8 SQL business intelligence reports built on **AdventureWorksDW2022** — customer analytics, product performance, sales trends, regional analysis, and executive KPIs, using SQL Server (T-SQL), CTEs, window functions, and views.
+5 SQL business intelligence reports built on **AdventureWorksDW2022** — customer analytics, product performance, sales trends, regional analysis, and executive KPIs, using SQL Server (T-SQL), CTEs, window functions, and views.
 
 ---
 
