@@ -1,4 +1,3 @@
-
 /* ============================================================
    Project 3: Sales Performance Dashboard
    ------------------------------------------------------------
@@ -22,59 +21,116 @@ DROP VIEW IF EXISTS Sales_Performance_Dashboard;
 GO
 
 CREATE VIEW Sales_Performance_Dashboard AS
-WITH SalesPerformance AS
+WITH SalesBase AS
 (
+    -- Raw fact rows with date parts pre-extracted
     SELECT
         SalesAmount,
-        OrderQuantity,
         SalesOrderNumber,
         CustomerKey,
-        CAST(CAST(DateKey AS varchar) AS date)                                   AS Order_Date,
-        YEAR(CAST(CAST(DateKey AS varchar) AS date))                             AS Year_Order_Date,
-        DATETRUNC(MONTH, CAST(CAST(DateKey AS varchar) AS date))                 AS Month_Order_Date,
-        DATENAME(QUARTER, CAST(CAST(DateKey AS varchar) AS date))                AS Quarter_Order_Date
+        CAST(CAST(DateKey AS varchar) AS date)                    AS Order_Date,
+        YEAR(CAST(CAST(DateKey AS varchar) AS date))              AS Year_Order_Date,
+        DATETRUNC(MONTH, CAST(CAST(DateKey AS varchar) AS date))  AS Month_Order_Date,
+        DATENAME(QUARTER, CAST(CAST(DateKey AS varchar) AS date)) AS Quarter_Order_Date
     FROM FactInternetSales f
     INNER JOIN DimDate d ON f.OrderDateKey = d.DateKey
 ),
-Sales_Performance AS
+Daily_Totals AS
 (
-    SELECT DISTINCT
+    -- One row per calendar day
+    SELECT
         Order_Date,
         Year_Order_Date,
         Month_Order_Date,
         Quarter_Order_Date,
-        ROUND(SUM(SalesAmount) OVER (PARTITION BY Order_Date), 2)                          AS Total_Revenue,
-        COUNT(DISTINCT SalesOrderNumber) OVER (PARTITION BY Order_Date)                    AS Total_Order,
-        COUNT(DISTINCT CustomerKey) OVER (PARTITION BY Order_Date)                         AS Total_Customer,
-        ROUND(
-            SUM(SalesAmount) OVER (PARTITION BY Order_Date)
-            / COUNT(DISTINCT SalesOrderNumber) OVER (PARTITION BY Order_Date), 2)          AS Average_Order_Value,
-        ROUND(SUM(SalesAmount) OVER (PARTITION BY Month_Order_Date), 2)                    AS Monthly_Sales,
-        ROUND(SUM(SalesAmount) OVER (PARTITION BY Year_Order_Date, Quarter_Order_Date), 2) AS Quarter_Sales,
-        ROUND(SUM(SalesAmount) OVER (PARTITION BY Year_Order_Date), 2)                     AS Yearly_Sales,
-        ROUND(SUM(SalesAmount) OVER (ORDER BY Order_Date
-              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 2)                        AS Running_Total_Sales,
-        ROUND(SUM(SalesAmount) OVER (PARTITION BY Month_Order_Date ORDER BY Month_Order_Date
-              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 2)                        AS Running_Monthly_Sales,
-        ROUND(SUM(SalesAmount) OVER (PARTITION BY Year_Order_Date ORDER BY Year_Order_Date
-              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 2)                        AS Running_Yearly_Sales,
-        ROUND(
-            SUM(SalesAmount) OVER (PARTITION BY Year_Order_Date, Month_Order_Date)
-            / SUM(SalesAmount) OVER (PARTITION BY Year_Order_Date), 2) * 100               AS Monthly_Contribution_To_Year,
-        ROUND(
-            SUM(SalesAmount) OVER (PARTITION BY Year_Order_Date)
-            / SUM(SalesAmount) OVER (), 2) * 100                                           AS Yearly_Contribution_To_TotalSales
-    FROM SalesPerformance
+        SUM(SalesAmount)                                              AS Total_Revenue,
+        COUNT(DISTINCT SalesOrderNumber)                              AS Total_Order,
+        COUNT(DISTINCT CustomerKey)                                   AS Total_Customer,
+        ROUND(SUM(SalesAmount) / COUNT(DISTINCT SalesOrderNumber), 2) AS Average_Order_Value
+    FROM SalesBase
+    GROUP BY Order_Date, Year_Order_Date, Month_Order_Date, Quarter_Order_Date
+),
+Running_Totals AS
+(
+    -- Cumulative revenue, built directly on the daily grain
+    SELECT
+        Order_Date,
+        SUM(Total_Revenue) OVER (
+            ORDER BY Order_Date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS Running_Total_Sales
+    FROM Daily_Totals
+),
+Monthly_Totals AS
+(
+    -- One row per month, with prior month attached for MoM growth
+    SELECT
+        Month_Order_Date,
+        SUM(Total_Revenue)                                      AS Monthly_Sales,
+        LAG(SUM(Total_Revenue)) OVER (ORDER BY Month_Order_Date) AS Previous_Month_Sales
+    FROM Daily_Totals
+    GROUP BY Month_Order_Date
+),
+Quarterly_Totals AS
+(
+    -- One row per year + quarter
+    SELECT
+        Year_Order_Date,
+        Quarter_Order_Date,
+        SUM(Total_Revenue) AS Quarter_Sales
+    FROM Daily_Totals
+    GROUP BY Year_Order_Date, Quarter_Order_Date
+),
+Yearly_Totals AS
+(
+    -- One row per year, with prior year attached for YoY growth
+    SELECT
+        Year_Order_Date,
+        SUM(Total_Revenue)                                     AS Yearly_Sales,
+        LAG(SUM(Total_Revenue)) OVER (ORDER BY Year_Order_Date) AS Previous_Year_Sales
+    FROM Daily_Totals
+    GROUP BY Year_Order_Date
+),
+Grand_Total AS
+(
+    -- Single company-wide total, used for the yearly contribution %
+    SELECT SUM(Yearly_Sales) AS Total_All_Sales
+    FROM Yearly_Totals
 )
-SELECT *,
-    LAG(Monthly_Sales) OVER (ORDER BY Year_Order_Date, Month_Order_Date)                   AS Previous_Month_Sales,
-    (Monthly_Sales - LAG(Monthly_Sales) OVER (ORDER BY Year_Order_Date, Month_Order_Date))
-        / LAG(Monthly_Sales) OVER (ORDER BY Year_Order_Date, Month_Order_Date) * 100       AS Month_Over_Month,
-    LAG(Yearly_Sales) OVER (ORDER BY Year_Order_Date)                                      AS Previous_Year_Sales,
-    (Yearly_Sales - LAG(Yearly_Sales) OVER (ORDER BY Year_Order_Date))
-        / LAG(Yearly_Sales) OVER (ORDER BY Year_Order_Date) * 100                          AS Year_Over_Year
-FROM Sales_Performance;
+SELECT
+    dt.Order_Date,
+    dt.Year_Order_Date,
+    dt.Month_Order_Date,
+    dt.Quarter_Order_Date,
+    dt.Total_Revenue,
+    dt.Total_Order,
+    dt.Total_Customer,
+    dt.Average_Order_Value,
+    rt.Running_Total_Sales,
+    mt.Monthly_Sales,
+    mt.Previous_Month_Sales,
+    ROUND((mt.Monthly_Sales - mt.Previous_Month_Sales) / mt.Previous_Month_Sales * 100, 2) AS Month_Over_Month,
+    qt.Quarter_Sales,
+    yt.Yearly_Sales,
+    yt.Previous_Year_Sales,
+    ROUND((yt.Yearly_Sales - yt.Previous_Year_Sales) / yt.Previous_Year_Sales * 100, 2)     AS Year_Over_Year,
+    ROUND(mt.Monthly_Sales / yt.Yearly_Sales, 4) * 100                                      AS Monthly_Contribution_To_Year,
+    ROUND(yt.Yearly_Sales / gt.Total_All_Sales, 4) * 100                                    AS Yearly_Contribution_To_TotalSales
+FROM Daily_Totals dt
+INNER JOIN Running_Totals   rt ON dt.Order_Date = rt.Order_Date
+INNER JOIN Monthly_Totals   mt ON dt.Month_Order_Date = mt.Month_Order_Date
+INNER JOIN Quarterly_Totals qt ON dt.Year_Order_Date = qt.Year_Order_Date AND dt.Quarter_Order_Date = qt.Quarter_Order_Date
+INNER JOIN Yearly_Totals    yt ON dt.Year_Order_Date = yt.Year_Order_Date
+CROSS JOIN Grand_Total gt;
 GO
 
 SELECT * FROM Sales_Performance_Dashboard;
 GO
+
+/*
+   Business Insights to pull from this view:
+   - Best / Worst Sales Month  -> ORDER BY Monthly_Sales DESC / ASC
+   - Best / Worst Quarter      -> ORDER BY Quarter_Sales DESC / ASC
+   - Highest Sales Year        -> ORDER BY Yearly_Sales DESC
+   - Sales Trend Analysis      -> plot Running_Total_Sales over Order_Date
+*/
